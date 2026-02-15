@@ -1,39 +1,173 @@
 from flask import Flask, request
-import random
-import requests
-import os
+import requests, random, json, time
 
 app = Flask(__name__)
 
+PAGE_ACCESS_TOKEN = "TOKEN_CUA_BAN"
 VERIFY_TOKEN = "123456"
-PAGE_ACCESS_TOKEN = "DAN_TOKEN_VAO_DAY"
 
 users = {}
 
-def tai_xiu():
-    x1 = random.randint(1,6)
-    x2 = random.randint(1,6)
-    x3 = random.randint(1,6)
-    tong = x1 + x2 + x3
+# ================== DATA ==================
+def load():
+    global users
+    try:
+        with open("data.json") as f:
+            users = json.load(f)
+    except:
+        users = {}
 
-    if x1 == x2 == x3:
-        return tong, "BO BA"
-    elif tong >= 11:
-        return tong, "TAI"
-    else:
-        return tong, "XIU"
+def save():
+    with open("data.json", "w") as f:
+        json.dump(users, f)
 
-def get_user(uid):
-    if uid not in users:
-        users[uid] = {"money":1000}
-    return users[uid]
+load()
 
-@app.route("/webhook", methods=["GET"])
+# ================== SEND ==================
+def send(uid, text):
+    url = f"https://graph.facebook.com/v17.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
+    data = {
+        "recipient": {"id": uid},
+        "message": {"text": text}
+    }
+    requests.post(url, json=data)
+
+# ================== GAME ==================
+def roll():
+    return random.randint(1,6) + random.randint(1,6) + random.randint(1,6)
+
+def result_text(total):
+    return "tai" if total >= 11 else "xiu"
+
+# ================== VERIFY ==================
+@app.route("/", methods=["GET"])
 def verify():
-    token = request.args.get("hub.verify_token")
-    if token == VERIFY_TOKEN:
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
         return request.args.get("hub.challenge")
-    return "Sai token"
+    return "error"
+
+# ================== WEBHOOK ==================
+@app.route("/", methods=["POST"])
+def webhook():
+    data = request.json
+
+    try:
+        msg = data["entry"][0]["messaging"][0]
+        sender = msg["sender"]["id"]
+
+        if "message" not in msg:
+            return "ok"
+
+        text = msg["message"].get("text", "").lower()
+
+        # ===== INIT USER =====
+        if sender not in users:
+            users[sender] = {
+                "money": 1000,
+                "last_daily": 0,
+                "win": 0,
+                "lose": 0
+            }
+
+        user = users[sender]
+
+        # ===== COMMAND =====
+        if text.startswith("tx"):
+            try:
+                _, bet, choice = text.split()
+                bet = int(bet)
+
+                if bet <= 0 or bet > user["money"]:
+                    send(sender, "❌ Tiền không hợp lệ")
+                    return "ok"
+
+                if choice not in ["tai", "xiu"]:
+                    send(sender, "❌ Chọn tai hoặc xiu")
+                    return "ok"
+
+                total = roll()
+                res = result_text(total)
+
+                if choice == res:
+                    user["money"] += bet
+                    user["win"] += 1
+                    msg = f"🎲 {total} => {res.upper()}\n✅ Thắng +{bet}"
+                else:
+                    user["money"] -= bet
+                    user["lose"] += 1
+                    msg = f"🎲 {total} => {res.upper()}\n❌ Thua -{bet}"
+
+                msg += f"\n💰 Tiền: {user['money']}"
+                send(sender, msg)
+                save()
+
+            except:
+                send(sender, "📌 Cách chơi: tx 100 tai")
+
+        elif text == "money":
+            send(sender, f"💰 Tiền: {user['money']}")
+
+        elif text == "daily":
+            now = time.time()
+            if now - user["last_daily"] >= 86400:
+                user["money"] += 500
+                user["last_daily"] = now
+                send(sender, "🎁 Nhận 500 xu")
+                save()
+            else:
+                send(sender, "⏳ Đã nhận hôm nay rồi")
+
+        elif text == "top":
+            top = sorted(users.items(), key=lambda x: x[1]["money"], reverse=True)[:5]
+            msg = "🏆 TOP\n"
+            for i, (uid, u) in enumerate(top):
+                msg += f"{i+1}. {u['money']}\n"
+            send(sender, msg)
+
+        elif text == "stat":
+            send(sender, f"📊 Win: {user['win']} | Lose: {user['lose']}")
+
+        elif text == "allin tai" or text == "allin xiu":
+            choice = text.split()[1]
+            bet = user["money"]
+
+            total = roll()
+            res = result_text(total)
+
+            if choice == res:
+                user["money"] += bet
+                user["win"] += 1
+                msg = f"🎲 {total} => {res}\n🔥 ALL IN THẮNG"
+            else:
+                user["money"] -= bet
+                user["lose"] += 1
+                msg = f"🎲 {total} => {res}\n💀 ALL IN THUA"
+
+            msg += f"\n💰 {user['money']}"
+            send(sender, msg)
+            save()
+
+        elif text == "help":
+            send(sender,
+            "🎲 BOT TÀI XỈU\n"
+            "tx 100 tai\n"
+            "money\n"
+            "daily\n"
+            "top\n"
+            "stat\n"
+            "allin tai/xiu"
+            )
+
+        else:
+            send(sender, "Gõ help để xem lệnh")
+
+    except Exception as e:
+        print(e)
+
+    return "ok"
+
+if __name__ == "__main__":
+    app.run(port=5000)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
